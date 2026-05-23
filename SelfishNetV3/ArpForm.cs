@@ -3,6 +3,7 @@ using PcapNet;
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Collections.Generic;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
@@ -28,12 +29,31 @@ namespace SelfishNetv3
         public object[] resolvState;
         public NetworkInterface nicNet;
         public static ArpForm instance;
+        private Panel advancedNetworkPanel;
+        private ComboBox comboAdvancedAdapters;
+        private TextBox textCustomSubnets;
+        private TextBox textDiagnostics;
+        private CheckBox checkGuestDiscovery;
+        private CheckBox checkForceSubnetScan;
+        private Button buttonApplyAdapter;
+        private Button buttonRefreshInterfaces;
+        private Button buttonForceScan;
+        private Button buttonDiagnostics;
+        private ToolStripButton toolStripButtonAdvanced;
+        private NetworkDiscoveryEngine discoveryEngine;
+        private List<NetworkAdapterInfo> advancedAdapters;
+        private Thread discoveryThread;
+        private bool discoveryRunning;
+        private int discoveryGeneration;
         public ArpForm()
         {
             InitializeComponent();
             ArpForm.instance = this;
             this.timerStatCount = 0;
             this.driver = new Driver();
+            this.discoveryEngine = new NetworkDiscoveryEngine();
+            this.advancedAdapters = new List<NetworkAdapterInfo>();
+            InitializeAdvancedNetworkControls();
         }
         public void licenseAccepted()
         {
@@ -51,19 +71,353 @@ namespace SelfishNetv3
                 if (!minimized) cadapter.Show((IWin32Window)this);
             }
         }
+
+        private void InitializeAdvancedNetworkControls()
+        {
+            toolStripButtonAdvanced = new ToolStripButton("Advanced");
+            toolStripButtonAdvanced.CheckOnClick = true;
+            toolStripButtonAdvanced.DisplayStyle = ToolStripItemDisplayStyle.Text;
+            toolStripButtonAdvanced.Click += new EventHandler(ToolStripButtonAdvanced_Click);
+            toolStrip1.Items.Add(toolStripButtonAdvanced);
+
+            advancedNetworkPanel = new Panel();
+            advancedNetworkPanel.Visible = false;
+            advancedNetworkPanel.BorderStyle = BorderStyle.FixedSingle;
+            advancedNetworkPanel.BackColor = System.Drawing.SystemColors.Control;
+            advancedNetworkPanel.Height = 190;
+            advancedNetworkPanel.Left = 0;
+            advancedNetworkPanel.Top = toolStrip1.Bottom;
+            advancedNetworkPanel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            advancedNetworkPanel.Width = this.ClientSize.Width;
+
+            Label labelAdapter = new Label();
+            labelAdapter.Text = "Adapter";
+            labelAdapter.Left = 8;
+            labelAdapter.Top = 12;
+            labelAdapter.Width = 56;
+            advancedNetworkPanel.Controls.Add(labelAdapter);
+
+            comboAdvancedAdapters = new ComboBox();
+            comboAdvancedAdapters.DropDownStyle = ComboBoxStyle.DropDownList;
+            comboAdvancedAdapters.Left = 70;
+            comboAdvancedAdapters.Top = 8;
+            comboAdvancedAdapters.Width = 430;
+            advancedNetworkPanel.Controls.Add(comboAdvancedAdapters);
+
+            buttonApplyAdapter = new Button();
+            buttonApplyAdapter.Text = "Apply";
+            buttonApplyAdapter.Left = 510;
+            buttonApplyAdapter.Top = 6;
+            buttonApplyAdapter.Width = 70;
+            buttonApplyAdapter.Click += new EventHandler(ButtonApplyAdapter_Click);
+            advancedNetworkPanel.Controls.Add(buttonApplyAdapter);
+
+            buttonRefreshInterfaces = new Button();
+            buttonRefreshInterfaces.Text = "Refresh";
+            buttonRefreshInterfaces.Left = 586;
+            buttonRefreshInterfaces.Top = 6;
+            buttonRefreshInterfaces.Width = 80;
+            buttonRefreshInterfaces.Click += new EventHandler(ButtonRefreshInterfaces_Click);
+            advancedNetworkPanel.Controls.Add(buttonRefreshInterfaces);
+
+            checkGuestDiscovery = new CheckBox();
+            checkGuestDiscovery.Text = "Guest discovery";
+            checkGuestDiscovery.Left = 680;
+            checkGuestDiscovery.Top = 10;
+            checkGuestDiscovery.Width = 130;
+            checkGuestDiscovery.Checked = true;
+            advancedNetworkPanel.Controls.Add(checkGuestDiscovery);
+
+            checkForceSubnetScan = new CheckBox();
+            checkForceSubnetScan.Text = "Force scan";
+            checkForceSubnetScan.Left = 820;
+            checkForceSubnetScan.Top = 10;
+            checkForceSubnetScan.Width = 100;
+            advancedNetworkPanel.Controls.Add(checkForceSubnetScan);
+
+            Label labelCustom = new Label();
+            labelCustom.Text = "Custom CIDR/range";
+            labelCustom.Left = 8;
+            labelCustom.Top = 45;
+            labelCustom.Width = 120;
+            advancedNetworkPanel.Controls.Add(labelCustom);
+
+            textCustomSubnets = new TextBox();
+            textCustomSubnets.Left = 132;
+            textCustomSubnets.Top = 42;
+            textCustomSubnets.Width = 368;
+            advancedNetworkPanel.Controls.Add(textCustomSubnets);
+
+            buttonForceScan = new Button();
+            buttonForceScan.Text = "Scan";
+            buttonForceScan.Left = 510;
+            buttonForceScan.Top = 40;
+            buttonForceScan.Width = 70;
+            buttonForceScan.Click += new EventHandler(ButtonForceScan_Click);
+            advancedNetworkPanel.Controls.Add(buttonForceScan);
+
+            buttonDiagnostics = new Button();
+            buttonDiagnostics.Text = "Diagnostics";
+            buttonDiagnostics.Left = 586;
+            buttonDiagnostics.Top = 40;
+            buttonDiagnostics.Width = 100;
+            buttonDiagnostics.Click += new EventHandler(ButtonDiagnostics_Click);
+            advancedNetworkPanel.Controls.Add(buttonDiagnostics);
+
+            textDiagnostics = new TextBox();
+            textDiagnostics.Left = 8;
+            textDiagnostics.Top = 76;
+            textDiagnostics.Width = advancedNetworkPanel.Width - 16;
+            textDiagnostics.Height = 106;
+            textDiagnostics.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+            textDiagnostics.Multiline = true;
+            textDiagnostics.ReadOnly = true;
+            textDiagnostics.ScrollBars = ScrollBars.Vertical;
+            advancedNetworkPanel.Controls.Add(textDiagnostics);
+
+            this.Controls.Add(advancedNetworkPanel);
+            advancedNetworkPanel.BringToFront();
+            toolStrip1.BringToFront();
+            RefreshAdvancedAdapters();
+            AdjustAdvancedNetworkLayout();
+        }
+
+        private void ToolStripButtonAdvanced_Click(object sender, EventArgs e)
+        {
+            advancedNetworkPanel.Visible = toolStripButtonAdvanced.Checked;
+            if (advancedNetworkPanel.Visible)
+            {
+                RefreshAdvancedAdapters();
+            }
+            AdjustAdvancedNetworkLayout();
+        }
+
+        private void AdjustAdvancedNetworkLayout()
+        {
+            if (advancedNetworkPanel == null)
+            {
+                return;
+            }
+
+            advancedNetworkPanel.Top = toolStrip1.Bottom;
+            advancedNetworkPanel.Width = this.ClientSize.Width;
+            textDiagnostics.Width = advancedNetworkPanel.Width - 16;
+            int top = advancedNetworkPanel.Visible ? advancedNetworkPanel.Bottom + 5 : 60;
+            treeGridView1.Top = top;
+            treeGridView1.Height = this.ClientSize.Height - top;
+        }
+
+        private void RefreshAdvancedAdapters()
+        {
+            if (comboAdvancedAdapters == null)
+            {
+                return;
+            }
+
+            List<string> diagnostics = new List<string>();
+            advancedAdapters = NetworkDiscoveryEngine.GetAdapters(diagnostics);
+            comboAdvancedAdapters.Items.Clear();
+            int selectedIndex = -1;
+            for (int i = 0; i < advancedAdapters.Count; i++)
+            {
+                NetworkAdapterInfo adapter = advancedAdapters[i];
+                comboAdvancedAdapters.Items.Add(adapter.DisplayName);
+                if (nicNet != null && adapter.Interface.Id == nicNet.Id)
+                {
+                    selectedIndex = i;
+                }
+            }
+
+            if (comboAdvancedAdapters.Items.Count > 0)
+            {
+                comboAdvancedAdapters.SelectedIndex = selectedIndex >= 0 ? selectedIndex : 0;
+            }
+        }
+
+        private void ButtonRefreshInterfaces_Click(object sender, EventArgs e)
+        {
+            RefreshAdvancedAdapters();
+            ShowDiagnosticsOnly();
+        }
+
+        private void ButtonApplyAdapter_Click(object sender, EventArgs e)
+        {
+            if (comboAdvancedAdapters.SelectedIndex < 0 || comboAdvancedAdapters.SelectedIndex >= advancedAdapters.Count)
+            {
+                return;
+            }
+
+            if (!advancedAdapters[comboAdvancedAdapters.SelectedIndex].HasIPv4 || !advancedAdapters[comboAdvancedAdapters.SelectedIndex].IsUp)
+            {
+                MessageBox.Show("Select an active adapter with an IPv4 address.");
+                return;
+            }
+
+            NicIsSelected(advancedAdapters[comboAdvancedAdapters.SelectedIndex].Interface);
+        }
+
+        private void ButtonForceScan_Click(object sender, EventArgs e)
+        {
+            RunEnhancedDiscovery(true);
+        }
+
+        private void ButtonDiagnostics_Click(object sender, EventArgs e)
+        {
+            ShowDiagnosticsOnly();
+        }
+
+        private void ShowDiagnosticsOnly()
+        {
+            List<string> diagnostics = new List<string>();
+            NetworkDiscoveryEngine.GetAdapters(diagnostics);
+            textDiagnostics.Text = string.Join(Environment.NewLine, diagnostics.ToArray());
+        }
+
+        private void RunEnhancedDiscovery(bool forceScan)
+        {
+            if (discoveryRunning || pcs == null)
+            {
+                return;
+            }
+
+            discoveryRunning = true;
+            buttonForceScan.Enabled = false;
+            if (textDiagnostics != null)
+            {
+                textDiagnostics.Text = "Discovery running...";
+            }
+
+            NetworkDiscoveryOptions options = new NetworkDiscoveryOptions();
+            options.SelectedInterface = nicNet;
+            options.SelectedInterfaceHasGateway = cArp != null && cArp.HasRouter;
+            options.GuestDetectionMode = checkGuestDiscovery == null || checkGuestDiscovery.Checked;
+            options.ForceLargeScans = forceScan || (checkForceSubnetScan != null && checkForceSubnetScan.Checked);
+            options.CustomSubnets = textCustomSubnets == null ? string.Empty : textCustomSubnets.Text;
+            if (options.ForceLargeScans)
+            {
+                options.MaxHostsPerSubnet = 4096;
+            }
+            int runGeneration = discoveryGeneration;
+
+            discoveryThread = new Thread(delegate()
+            {
+                NetworkDiscoveryResult result = null;
+                try
+                {
+                    result = discoveryEngine.Scan(options);
+                    if (!IsDisposed && IsHandleCreated)
+                    {
+                        BeginInvoke((MethodInvoker)delegate()
+                        {
+                            if (runGeneration != discoveryGeneration)
+                            {
+                                discoveryRunning = false;
+                                buttonForceScan.Enabled = true;
+                                return;
+                            }
+                            MergeDiscoveryResult(result);
+                            discoveryRunning = false;
+                            buttonForceScan.Enabled = true;
+                            if (textDiagnostics != null)
+                            {
+                                textDiagnostics.Text = string.Join(Environment.NewLine, result.Diagnostics.ToArray());
+                            }
+                        });
+                    }
+                    else
+                    {
+                        discoveryRunning = false;
+                    }
+                }
+                catch
+                {
+                    discoveryRunning = false;
+                    try
+                    {
+                        if (!IsDisposed && IsHandleCreated)
+                        {
+                            BeginInvoke((MethodInvoker)delegate()
+                            {
+                                buttonForceScan.Enabled = true;
+                                if (textDiagnostics != null)
+                                {
+                                    textDiagnostics.Text = "Discovery failed. See permissions, adapter, or Npcap/WinPcap status.";
+                                }
+                            });
+                        }
+                    }
+                    catch
+                    {
+                    }
+                }
+            });
+            discoveryThread.IsBackground = true;
+            discoveryThread.Start();
+        }
+
+        private void MergeDiscoveryResult(NetworkDiscoveryResult result)
+        {
+            if (result == null || pcs == null)
+            {
+                return;
+            }
+
+            foreach (DiscoveredDevice device in result.Devices)
+            {
+                if (cArp != null && cArp.localIP != null && tools.areValuesEqual(device.IP.GetAddressBytes(), cArp.localIP))
+                {
+                    continue;
+                }
+
+                PC pc = new PC();
+                pc.ip = device.IP;
+                pc.mac = NetworkDiscoveryEngine.HasUsableMac(device.Mac) ? device.Mac : PhysicalAddress.None;
+                pc.capDown = 0;
+                pc.capUp = 0;
+                pc.isLocalPc = false;
+                pc.name = string.Empty;
+                pc.nbPacketReceivedSinceLastReset = 0;
+                pc.nbPacketSentSinceLastReset = 0;
+                pc.redirect = device.CanRedirect;
+                pc.canRedirect = device.CanRedirect;
+                pc.discoverySource = device.Source;
+                pc.timeSinceLastRarp = DateTime.Now;
+                pc.totalPacketReceived = 0;
+                pc.totalPacketSent = 0;
+                pc.isGateway = cArp != null && cArp.routerIP != null && tools.areValuesEqual(device.IP.GetAddressBytes(), cArp.routerIP);
+                pcs.addPcToList(pc);
+            }
+        }
+
         bool first_start;
         bool minimized;
 
         public void NicIsSelected(NetworkInterface nic)
         {
+            StopCurrentNetworkSession();
+            ResetDeviceTree();
             this.pcs = new PcList();
             this.pcs.SetCallBackOnNewPC(new delegateOnNewPC(this.callbackOnNewPC));
             this.pcs.SetCallBackOnPCRemove(new delegateOnNewPC(this.callbackOnPCRemove));
             this.nicNet = nic;
             CArp carp = new CArp(nic, this.pcs);
             this.cArp = carp;
+            if (this.cArp.localIP == null || this.cArp.localMAC == null)
+            {
+                MessageBox.Show("The selected adapter does not have an IPv4 address.");
+                return;
+            }
             carp.startArpListener();
-            this.cArp.findMacRouter();
+            if (this.cArp.HasRouter)
+            {
+                this.cArp.findMacRouter();
+            }
+            else
+            {
+                this.treeGridView1.Nodes[0].Cells[0].Value = (object)"No IPv4 gateway";
+                this.treeGridView1.Nodes[0].Cells[1].Value = (object)string.Empty;
+                this.treeGridView1.Nodes[0].Cells[2].Value = (object)string.Empty;
+            }
             PC pc = new PC();
             pc.ip = new IPAddress(this.cArp.localIP);
             pc.mac = new PhysicalAddress(this.cArp.localMAC);
@@ -74,6 +428,8 @@ namespace SelfishNetv3
             pc.nbPacketReceivedSinceLastReset = 0;
             pc.nbPacketSentSinceLastReset = 0;
             pc.redirect = false;
+            pc.canRedirect = false;
+            pc.discoverySource = "selected interface";
             DateTime now = DateTime.Now;
             pc.timeSinceLastRarp = (ValueType)now;
             pc.totalPacketReceived = 0;
@@ -83,6 +439,45 @@ namespace SelfishNetv3
             this.timer2.Interval = 5000;
             this.timer2.Start();
             this.treeGridView1.Nodes[0].Expand();
+            RefreshAdvancedAdapters();
+            RunEnhancedDiscovery(false);
+        }
+
+        private void StopCurrentNetworkSession()
+        {
+            timer1.Stop();
+            timer2.Stop();
+            timerSpoof.Stop();
+            timerDiscovery.Stop();
+            discoveryGeneration++;
+            discoveryRunning = false;
+            toolStripButton2.Checked = false;
+            toolStripButton2.Enabled = true;
+            if (cArp != null)
+            {
+                cArp.Dispose();
+                cArp = null;
+            }
+        }
+
+        private void ResetDeviceTree()
+        {
+            if (treeGridView1.Nodes.Count == 0)
+            {
+                treeGridView1.Nodes.Add(new AdvancedDataGridView.TreeGridNode());
+            }
+
+            while (treeGridView1.Nodes[0].Nodes.Count > 0)
+            {
+                treeGridView1.Nodes[0].Nodes.RemoveAt(0);
+            }
+
+            for (int i = 0; i < treeGridView1.Nodes[0].Cells.Count; i++)
+            {
+                treeGridView1.Nodes[0].Cells[i].Value = null;
+                treeGridView1.Nodes[0].Cells[i].ReadOnly = true;
+            }
+            treeGridView1.Nodes[0].ImageIndex = 0;
         }
 
         [Obsolete]
@@ -155,10 +550,11 @@ namespace SelfishNetv3
 
         private void AddPc(PC pc)
         {
+            string macText = NetworkDiscoveryEngine.HasUsableMac(pc.mac) ? pc.mac.ToString() : "N/A";
             if (pc.isGateway)
             {
                 this.treeGridView1.Nodes[0].Cells[1].Value = (object)pc.ip.ToString();
-                this.treeGridView1.Nodes[0].Cells[2].Value = (object)pc.mac.ToString();
+                this.treeGridView1.Nodes[0].Cells[2].Value = (object)macText;
                 this.treeGridView1.Nodes[0].Cells[5].ReadOnly = true;
                 this.treeGridView1.Nodes[0].Cells[6].ReadOnly = true;
                 this.treeGridView1.Nodes[0].Cells[7].ReadOnly = true;
@@ -170,7 +566,7 @@ namespace SelfishNetv3
             }
             else if (pc.isLocalPc)
             {
-                TreeGridNode treeGridNode = this.treeGridView1.Nodes[0].Nodes.Add((object)"Your PC", (object)pc.ip, (object)pc.mac.ToString());
+                TreeGridNode treeGridNode = this.treeGridView1.Nodes[0].Nodes.Add((object)"Your PC", (object)pc.ip, (object)macText);
                 treeGridNode.ImageIndex = 0;
                 treeGridNode.Cells[5].Value = (object)0;
                 treeGridNode.Cells[6].Value = (object)0;
@@ -183,22 +579,29 @@ namespace SelfishNetv3
             }
             else
             {
-                TreeGridNode treeGridNode = this.treeGridView1.Nodes[0].Nodes.Add((object)string.Empty, (object)pc.ip, (object)pc.mac.ToString(), (object)string.Empty, (object)string.Empty, (object)0, (object)0, (object)false, (object)true);
+                TreeGridNode treeGridNode = this.treeGridView1.Nodes[0].Nodes.Add((object)string.Empty, (object)pc.ip, (object)macText, (object)string.Empty, (object)string.Empty, (object)0, (object)0, (object)false, (object)pc.canRedirect);
                 treeGridNode.ImageIndex = 0;
-                treeGridNode.Cells[5].ReadOnly = false;
-                treeGridNode.Cells[6].ReadOnly = false;
+                treeGridNode.Cells[5].ReadOnly = !pc.canRedirect;
+                treeGridNode.Cells[6].ReadOnly = !pc.canRedirect;
+                treeGridNode.Cells[7].ReadOnly = !pc.canRedirect;
+                treeGridNode.Cells[8].ReadOnly = !pc.canRedirect;
             }
         }
         private void ToolStripButton1_Click(object sender, EventArgs e)
         {
-            this.cArp.startArpDiscovery();
+            if (this.cArp != null)
+            {
+                this.cArp.startArpDiscovery();
+            }
+            RunEnhancedDiscovery(false);
         }
 
         private void ToolStripButton2_Click(object sender, EventArgs e)
         {
-            if (this.toolStripButton2.Checked)
+            if (this.toolStripButton2.Checked || this.cArp == null)
                 return;
-            this.cArp.startRedirector();
+            if (this.cArp.startRedirector() != 0)
+                return;
             this.toolStripButton2.Checked = true;
             this.timer1.Interval = 1000;
             this.timer1.Start();
@@ -211,7 +614,7 @@ namespace SelfishNetv3
 
         private void ToolStripButton3_Click(object sender, EventArgs e)
         {
-            if (!this.toolStripButton2.Checked)
+            if (!this.toolStripButton2.Checked || this.cArp == null)
                 return;
             this.cArp.stopRedirector();
             this.cArp.completeUnspoof();
@@ -304,6 +707,8 @@ namespace SelfishNetv3
                 IPAddress ipAddress1 = tools.getIpAddress(this.treeGridView1.Rows[e.RowIndex].Cells[1].Value.ToString());
                 if (this.treeGridView1.Rows[e.RowIndex].Cells[8].Value.ToString().CompareTo("False") != 0)
                     return;
+                if (this.cArp == null || !this.cArp.HasRouter)
+                    return;
                 for (int index = 0; index < 35; ++index)
                     this.cArp.UnSpoof(ipAddress1, new IPAddress(this.cArp.routerIP));
 
@@ -390,6 +795,8 @@ namespace SelfishNetv3
 
         private void Timer2_Tick(object sender, EventArgs e)
         {
+            if (this.cArp == null)
+                return;
             int index1 = 0;
             if (0 < this.treeGridView1.Nodes[0].Nodes.Count)
             {
@@ -420,6 +827,8 @@ namespace SelfishNetv3
 
         private void TimerSpoof_Tick(object sender, EventArgs e)
         {
+            if (this.cArp == null || !this.cArp.HasRouter)
+                return;
             this.timerSpoof.Interval = 5000;
             int index = 0;
             if (0 >= this.treeGridView1.Nodes[0].Nodes.Count)
@@ -429,7 +838,7 @@ namespace SelfishNetv3
                 if (this.treeGridView1.Nodes[0].Nodes[index].Cells[8].Value.ToString().CompareTo("True") == 0)
                 {
                     PC pcFromIp = this.pcs.getPCFromIP(tools.getIpAddress(this.treeGridView1.Nodes[0].Nodes[index].Cells[1].Value.ToString()).GetAddressBytes());
-                    if (!pcFromIp.isLocalPc)
+                    if (pcFromIp != null && !pcFromIp.isLocalPc && pcFromIp.canRedirect)
                         this.cArp.Spoof(pcFromIp.ip, new IPAddress(this.cArp.routerIP));
                 }
                 ++index;
@@ -497,6 +906,7 @@ namespace SelfishNetv3
 
         private void ArpForm_Resize(object sender, EventArgs e)
         {
+            AdjustAdvancedNetworkLayout();
             if (WindowState == FormWindowState.Minimized)
             {
                 Hide();

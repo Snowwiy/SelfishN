@@ -24,6 +24,10 @@ namespace SelfishNetv3
 
         public bool redirect;
 
+        public bool canRedirect = true;
+
+        public string discoverySource = string.Empty;
+
         public int totalPacketSent;
 
         public int totalPacketReceived;

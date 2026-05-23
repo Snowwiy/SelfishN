@@ -2,6 +2,7 @@ using PcapNet;
 using System;
 using System.Net;
 using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
@@ -52,121 +53,38 @@ namespace SelfishNetv3
 
         public byte[] broadcastMac;
 
+        public NetworkInterface Adapter
+        {
+            get { return nicNet; }
+        }
+
+        public bool HasRouter
+        {
+            get { return routerIP != null && routerIP.Length == 4; }
+        }
+
         private void discoverer()
         {
             isDiscovering = true;
-            IPAddress iPAddress = new IPAddress(netmask);
-            char[] separator = new char[2]
+            if (localIP == null || netmask == null)
             {
-            '.',
-            '\u0003'
-            };
-            string[] array = iPAddress.ToString().Split(separator);
-            int[] array2 = new int[4];
-            int num = 0;
-            do
-            {
-                array2[num] = Convert.ToInt32(array[num]);
-                num++;
+                isDiscovering = false;
+                discovererThreadTerminated.Set();
+                return;
             }
-            while (num < 4);
-            IPAddress iPAddress2 = new IPAddress(localIP);
-            char[] separator2 = new char[2]
+
+            IPv4ScanTarget target = NetworkDiscoveryEngine.CreateTargetFromAddressAndMask(new IPAddress(localIP), new IPAddress(netmask));
+            foreach (IPAddress ip in target.EnumerateHosts(4096))
             {
-            '.',
-            '\u0003'
-            };
-            string[] array3 = iPAddress2.ToString().Split(separator2);
-            int[] array4 = new int[4];
-            int num2 = 0;
-            do
-            {
-                array4[num2] = Convert.ToInt32(array3[num2]);
-                num2++;
-            }
-            while (num2 < 4);
-            int num3 = array2[0];
-            int num4 = 256 - num3;
-            int num5 = array4[0] / num4 * num4;
-            int num6 = (255 - num3) / num4 + num5;
-            if (num6 < num5 - num3 + 256)
-            {
-                int num27;
-                do
+                if (!isDiscovering)
                 {
-                    int num7 = array2[1];
-                    int num8 = -num7;
-                    int num9 = array4[1] / (num8 + 256) * (num8 + 256);
-                    int num10 = (num8 + 255) / (num8 + 256) + num9;
-                    if (num10 < num9 - num7 + 256)
-                    {
-                        int num26;
-                        do
-                        {
-                            int num11 = array2[2];
-                            int num12 = -num11;
-                            int num13 = array4[2] / (num12 + 256) * (num12 + 256);
-                            int num14 = (num12 + 255) / (num12 + 256) + num13;
-                            if (num14 < num13 - num11 + 256)
-                            {
-                                int num15 = array4[3];
-                                int num16 = array2[3];
-                                int num25;
-                                do
-                                {
-                                    int num17 = -num16;
-                                    int num18 = num15 / (num17 + 256) * (num17 + 256);
-                                    int num19 = (num17 + 255) / (num17 + 256) + num18;
-                                    if (num19 < num18 - num16 + 256)
-                                    {
-                                        int num24;
-                                        do
-                                        {
-                                            if (isDiscovering)
-                                            {
-                                                string[] array5 = new string[7];
-                                                int num20 = num6;
-                                                array5[0] = num20.ToString();
-                                                array5[1] = ".";
-                                                int num21 = num10;
-                                                array5[2] = num21.ToString();
-                                                array5[3] = ".";
-                                                int num22 = num14;
-                                                array5[4] = num22.ToString();
-                                                array5[5] = ".";
-                                                int num23 = num19;
-                                                array5[6] = num23.ToString();
-                                                string ip = string.Concat(array5);
-                                                findMac(ip);
-                                                Thread.Sleep(5);
-                                                num19++;
-                                                num16 = array2[3];
-                                                num24 = 256 - num16;
-                                                num15 = array4[3];
-                                                continue;
-                                            }
-                                            discovererThreadTerminated.Set();
-                                            return;
-                                        }
-                                        while (num19 < num15 / num24 * num24 - num16 + 256);
-                                    }
-                                    num14++;
-                                    num11 = array2[2];
-                                    num25 = 256 - num11;
-                                }
-                                while (num14 < array4[2] / num25 * num25 - num11 + 256);
-                            }
-                            num10++;
-                            num7 = array2[1];
-                            num26 = 256 - num7;
-                        }
-                        while (num10 < array4[1] / num26 * num26 - num7 + 256);
-                    }
-                    num6++;
-                    num3 = array2[0];
-                    num27 = 256 - num3;
+                    discovererThreadTerminated.Set();
+                    return;
                 }
-                while (num6 < array4[0] / num27 * num27 - num3 + 256);
+
+                // This is intentionally still ARP-only. Cross-VLAN/guest subnets are handled by NetworkDiscoveryEngine.
+                findMac(ip.ToString());
+                Thread.Sleep(5);
             }
             isDiscovering = false;
             discovererThreadTerminated.Set();
@@ -200,6 +118,12 @@ namespace SelfishNetv3
                         continue;
                     }
                     Array.Copy(pkt_data, 6, array, 0, 6);
+                    if (pkt_data.Length >= 34)
+                    {
+                        byte[] passiveSourceIp = new byte[4];
+                        Array.Copy(pkt_data, 26, passiveSourceIp, 0, 4);
+                        addPassiveEndpoint(array, passiveSourceIp);
+                    }
                     if (tools.areValuesEqual(array, localMAC))
                     {
                         Array.Copy(pkt_data, 26, array2, 0, 4);
@@ -254,6 +178,51 @@ namespace SelfishNetv3
             redirectorThreadTerminated.Set();
         }
 
+        private void addPassiveEndpoint(byte[] mac, byte[] ip)
+        {
+            if (tools.areValuesEqual(mac, localMAC) || tools.areValuesEqual(ip, localIP) || !isInLocalSubnet(ip) || !NetworkDiscoveryEngine.HasUsableMac(new PhysicalAddress(mac)))
+            {
+                return;
+            }
+
+            PC pC = new PC();
+            pC.ip = new IPAddress(ip);
+            pC.mac = new PhysicalAddress(mac);
+            pC.capDown = 0;
+            pC.capUp = 0;
+            pC.isLocalPc = false;
+            pC.name = "";
+            pC.nbPacketReceivedSinceLastReset = 0;
+            pC.nbPacketSentSinceLastReset = 0;
+            pC.redirect = true;
+            pC.canRedirect = HasRouter;
+            pC.discoverySource = "passive IP traffic";
+            DateTime now = DateTime.Now;
+            pC.timeSinceLastRarp = now;
+            pC.totalPacketReceived = 0;
+            pC.totalPacketSent = 0;
+            pC.isGateway = tools.areValuesEqual(ip, routerIP);
+            pcList.addPcToList(pC);
+        }
+
+        private bool isInLocalSubnet(byte[] ip)
+        {
+            if (ip == null || localIP == null || netmask == null || ip.Length != 4 || localIP.Length != 4 || netmask.Length != 4)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < 4; i++)
+            {
+                if ((ip[i] & netmask[i]) != (localIP[i] & netmask[i]))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
         private void arpListener()
         {
             byte[] pkt_data = null;
@@ -288,6 +257,8 @@ namespace SelfishNetv3
                     pC.nbPacketReceivedSinceLastReset = 0;
                     pC.nbPacketSentSinceLastReset = 0;
                     pC.redirect = true;
+                    pC.canRedirect = HasRouter;
+                    pC.discoverySource = "ARP listener";
                     DateTime now = DateTime.Now;
                     pC.timeSinceLastRarp = now;
                     pC.totalPacketReceived = 0;
@@ -312,24 +283,24 @@ namespace SelfishNetv3
         {
             pcList = pclist;
             nicNet = nic;
-            int num = 0;
-            if (0 < nic.GetIPProperties().UnicastAddresses.Count)
+            IPInterfaceProperties properties = nic.GetIPProperties();
+            foreach (UnicastIPAddressInformation address in properties.UnicastAddresses)
             {
-                do
+                if (address.Address.AddressFamily == AddressFamily.InterNetwork && address.IPv4Mask != null)
                 {
-                    if (!Convert.ToString(nicNet.GetIPProperties().UnicastAddresses[num].Address.AddressFamily).EndsWith("V6"))
-                    {
-                        localIP = nicNet.GetIPProperties().UnicastAddresses[num].Address.GetAddressBytes();
-                        netmask = nicNet.GetIPProperties().UnicastAddresses[num].IPv4Mask.GetAddressBytes();
-                    }
-                    num++;
+                    localIP = address.Address.GetAddressBytes();
+                    netmask = address.IPv4Mask.GetAddressBytes();
+                    break;
                 }
-                while (num < nicNet.GetIPProperties().UnicastAddresses.Count);
             }
             localMAC = nicNet.GetPhysicalAddress().GetAddressBytes();
-            if (nicNet.GetIPProperties().GatewayAddresses.Count > 0)
+            foreach (GatewayIPAddressInformation gateway in properties.GatewayAddresses)
             {
-                routerIP = nicNet.GetIPProperties().GatewayAddresses[0].Address.GetAddressBytes();
+                if (gateway.Address.AddressFamily == AddressFamily.InterNetwork && !gateway.Address.Equals(IPAddress.Any))
+                {
+                    routerIP = gateway.Address.GetAddressBytes();
+                    break;
+                }
             }
             byte[] array = broadcastMac = new byte[6];
             int num2 = 0;
@@ -373,7 +344,7 @@ namespace SelfishNetv3
         {
             PC pCFromIP = pcList.getPCFromIP(ip1.GetAddressBytes());
             PC pCFromIP2 = pcList.getPCFromIP(ip2.GetAddressBytes());
-            if (pCFromIP != null && pCFromIP2 != null)
+            if (pCFromIP != null && pCFromIP2 != null && pCFromIP.canRedirect && NetworkDiscoveryEngine.HasUsableMac(pCFromIP.mac) && NetworkDiscoveryEngine.HasUsableMac(pCFromIP2.mac))
             {
                 byte[] array = localMAC;
                 pcaparp.pcapnet_sendpacket(buildArpPacket(pCFromIP.mac.GetAddressBytes(), array, 2, array, pCFromIP2.ip.GetAddressBytes(), pCFromIP.mac.GetAddressBytes(), pCFromIP.ip.GetAddressBytes()));
@@ -391,7 +362,7 @@ namespace SelfishNetv3
         {
             PC pCFromIP = pcList.getPCFromIP(ip1.GetAddressBytes());
             PC pCFromIP2 = pcList.getPCFromIP(ip2.GetAddressBytes());
-            if (pCFromIP != null && pCFromIP2 != null)
+            if (pCFromIP != null && pCFromIP2 != null && NetworkDiscoveryEngine.HasUsableMac(pCFromIP.mac) && NetworkDiscoveryEngine.HasUsableMac(pCFromIP2.mac))
             {
                 pcaparp.pcapnet_sendpacket(buildArpPacket(pCFromIP.mac.GetAddressBytes(), pCFromIP2.mac.GetAddressBytes(), 1, pCFromIP2.mac.GetAddressBytes(), pCFromIP2.ip.GetAddressBytes(), broadcastMac, pCFromIP.ip.GetAddressBytes()));
                 pcaparp.pcapnet_sendpacket(buildArpPacket(pCFromIP2.mac.GetAddressBytes(), pCFromIP.mac.GetAddressBytes(), 1, pCFromIP.mac.GetAddressBytes(), pCFromIP.ip.GetAddressBytes(), broadcastMac, pCFromIP2.ip.GetAddressBytes()));
@@ -400,11 +371,19 @@ namespace SelfishNetv3
 
         public void findMacRouter()
         {
+            if (!HasRouter)
+            {
+                return;
+            }
             findMac(new IPAddress(routerIP).ToString());
         }
 
         public void findMac(string ip)
         {
+            if (localIP == null || localMAC == null || broadcastMac == null)
+            {
+                return;
+            }
             string text = null;
             if (pcaparp.nicHandle == IntPtr.Zero && !pcaparp.pcapnet_openLive(nicNet.Id, 65535, 0, 1, text))
             {
@@ -419,6 +398,11 @@ namespace SelfishNetv3
 
         public int startRedirector()
         {
+            if (!HasRouter)
+            {
+                MessageBox.Show("The selected adapter has no IPv4 gateway. Discovery can run, but ARP redirection is unavailable on this adapter.");
+                return -3;
+            }
             string text = null;
             if (pcapredirect.nicHandle == IntPtr.Zero && !pcapredirect.pcapnet_openLive(nicNet.Id, 65535, 0, 1, text))
             {

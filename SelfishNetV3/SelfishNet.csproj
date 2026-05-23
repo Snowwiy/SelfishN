@@ -159,6 +159,7 @@
     <Compile Include="main.Designer.cs">
       <DependentUpon>main.cs</DependentUpon>
     </Compile>
+    <Compile Include="NetworkDiscovery.cs" />
     <Compile Include="PC.cs" />
     <Compile Include="PcList.cs" />
     <Compile Include="Program.cs" />

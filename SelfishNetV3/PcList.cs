@@ -30,12 +30,32 @@ namespace SelfishNetv3
                 {
                     DateTime now = DateTime.Now;
                     item.timeSinceLastRarp = now;
+                    if (!NetworkDiscoveryEngine.HasUsableMac(item.mac) && NetworkDiscoveryEngine.HasUsableMac(pc.mac))
+                    {
+                        item.mac = pc.mac;
+                    }
+                    item.canRedirect = item.canRedirect || pc.canRedirect;
+                    item.redirect = item.redirect || pc.redirect;
+                    if (!string.IsNullOrEmpty(pc.discoverySource) && item.discoverySource.IndexOf(pc.discoverySource) < 0)
+                    {
+                        if (string.IsNullOrEmpty(item.discoverySource))
+                        {
+                            item.discoverySource = pc.discoverySource;
+                        }
+                        else
+                        {
+                            item.discoverySource = item.discoverySource + ", " + pc.discoverySource;
+                        }
+                    }
                     Monitor.Exit(pclist.SyncRoot);
                     return false;
                 }
             }
             ArrayList.Synchronized(pclist).Add(pc);
-            delOnNewPC.Invoke(pc);
+            if (delOnNewPC != null)
+            {
+                delOnNewPC.Invoke(pc);
+            }
             Monitor.Exit(pclist.SyncRoot);
             return true;
         }

@@ -1,16 +1,18 @@
-﻿using System;
-using System.Collections;
+using System;
+using System.Collections.Generic;
+using System.Net;
 using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Windows.Forms;
 
 namespace SelfishNetv3
 {
-#pragma warning disable  // Falta el comentario XML para el tipo o miembro visible públicamente
+#pragma warning disable  // Falta el comentario XML para el tipo o miembro visible publicamente
     public partial class CAdapter : Form
     {
         private NetworkInterface[] nics;
 
-        private IEnumerator nicsEnum;
+        private List<NetworkInterface> visibleNics;
 
         public NetworkInterface selectedNic;
 
@@ -19,6 +21,7 @@ namespace SelfishNetv3
         {
             InitializeComponent();
             nics = NetworkInterface.GetAllNetworkInterfaces();
+            visibleNics = new List<NetworkInterface>();
             buttonOK.Enabled = false;
             packetsHaveToBeRedirected = false;
             buttonCancel.Text = "Quit";
@@ -26,50 +29,20 @@ namespace SelfishNetv3
 
         private void ComboBox1_SelectedIndexChanged(object sender, EventArgs e)
         {
-            if (!(nicsEnum = nics.GetEnumerator()).MoveNext())
+            if (comboBox1.SelectedIndex < 0 || comboBox1.SelectedIndex >= visibleNics.Count)
             {
                 return;
             }
-            NetworkInterface networkInterface;
-            while (true)
-            {
-                networkInterface = (NetworkInterface)nicsEnum.Current;
-                if (networkInterface.Description.CompareTo(comboBox1.SelectedItem.ToString()) == 0)
-                {
-                    break;
-                }
-                if (!nicsEnum.MoveNext())
-                {
-                    return;
-                }
-            }
+
+            NetworkInterface networkInterface = visibleNics[comboBox1.SelectedIndex];
             labelTypeText.Text = ((NetworkInterfaceType)(object)networkInterface.NetworkInterfaceType).ToString();
-            int num = 0;
-            if (0 < networkInterface.GetIPProperties().UnicastAddresses.Count)
-            {
-                do
-                {
-                    if (Convert.ToString(networkInterface.GetIPProperties().UnicastAddresses[num].Address.AddressFamily).EndsWith("V6"))
-                    {
-                        num++;
-                        continue;
-                    }
-                    labelIpText.Text = networkInterface.GetIPProperties().UnicastAddresses[num].Address.ToString();
-                    break;
-                }
-                while (num < networkInterface.GetIPProperties().UnicastAddresses.Count);
-            }
-            if (networkInterface.GetIPProperties().GatewayAddresses.Count > 0 && networkInterface.GetIPProperties().GatewayAddresses[0].Address.ToString().CompareTo("0.0.0.0") != 0)
-            {
-                labelGWText.Text = networkInterface.GetIPProperties().GatewayAddresses[0].Address.ToString();
-                buttonOK.Enabled = true;
-                selectedNic = networkInterface;
-            }
-            else
-            {
-                labelGWText.Text = "No Gateway !";
-                buttonOK.Enabled = false;
-            }
+            labelIpText.Text = GetPrimaryIPv4(networkInterface);
+            IPAddress gateway = GetPrimaryGateway(networkInterface);
+            labelGWText.Text = gateway == null ? "No Gateway - discovery only" : gateway.ToString();
+
+            selectedNic = networkInterface;
+            buttonOK.Enabled = HasIPv4(networkInterface);
+            UpdateRedirectInfo(networkInterface);
         }
 
         private void ButtonCancel_Click(object sender, EventArgs e)
@@ -109,14 +82,6 @@ namespace SelfishNetv3
                 Close();
 
             }
-
-
-
-
-
-
-
-
         }
 
         private void ButtonOK_Click(object sender, EventArgs e)
@@ -125,66 +90,115 @@ namespace SelfishNetv3
             ArpForm.instance.Enabled = true;
             ArpForm.instance.NicIsSelected(selectedNic);
             Close();
-
         }
 
         private void CAdapter_Shown(object sender, EventArgs e)
         {
             Opacity = 100;
             ArpForm.instance.Enabled = false;
-            (nicsEnum = nics.GetEnumerator()).MoveNext();
-            if (((NetworkInterface)nicsEnum.Current).GetIPProperties().GetIPv4Properties().IsForwardingEnabled)
+            RefreshAdapterList();
+        }
+
+        private void RefreshAdapterList()
+        {
+            nics = NetworkInterface.GetAllNetworkInterfaces();
+            visibleNics.Clear();
+            comboBox1.Items.Clear();
+
+            foreach (NetworkInterface networkInterface in nics)
             {
-                labelRedirectInfo.Text = "Windows does redirect packet,\n internal redirection will be turned off";
-                packetsHaveToBeRedirected = false;
-            }
-            else
-            {
-                labelRedirectInfo.Text = "Windows does not redirect packet,\n internal redirection will be turned on";
-                packetsHaveToBeRedirected = true;
-            }
-            nicsEnum.Reset();
-            if (nicsEnum.MoveNext())
-            {
-                do
+                if (networkInterface.OperationalStatus == OperationalStatus.Up && HasIPv4(networkInterface))
                 {
-                    NetworkInterface networkInterface = (NetworkInterface)nicsEnum.Current;
-                    if (networkInterface.GetIPProperties().GatewayAddresses.Count > 0 && networkInterface.OperationalStatus == OperationalStatus.Up)
-                    {
-                        comboBox1.Items.Add(((NetworkInterface)nicsEnum.Current).Description);
-                    }
-                }
-                while (nicsEnum.MoveNext());
-            }
-            if (comboBox1.Items.Count > 1)
-            {
-                int num = 0;
-                nicsEnum.Reset();
-                if (nicsEnum.MoveNext())
-                {
-                    do
-                    {
-                        NetworkInterface networkInterface2 = (NetworkInterface)nicsEnum.Current;
-                        if (networkInterface2.GetIPProperties().GatewayAddresses.Count <= 0 || networkInterface2.GetIPProperties().GatewayAddresses[0].Address.ToString().CompareTo("0.0.0.0") == 0)
-                        {
-                            num++;
-                            continue;
-                        }
-                        comboBox1.SelectedIndex = comboBox1.Items.Count - 1;
-                        return;
-                    }
-                    while (nicsEnum.MoveNext());
+                    visibleNics.Add(networkInterface);
+                    comboBox1.Items.Add(BuildDisplayName(networkInterface));
                 }
             }
-            if (comboBox1.Items.Count == 1)
+
+            if (comboBox1.Items.Count == 0)
             {
-                comboBox1.SelectedIndex = 0;
+                MessageBox.Show("No active IPv4 network adapter has been found!");
+                ((IDisposable)ArpForm.instance).Dispose();
                 return;
             }
-            MessageBox.Show("No network card with a gateway has been found!");
-            ((IDisposable)ArpForm.instance).Dispose();
 
+            int selectedIndex = 0;
+            for (int i = 0; i < visibleNics.Count; i++)
+            {
+                if (GetPrimaryGateway(visibleNics[i]) != null)
+                {
+                    selectedIndex = i;
+                    break;
+                }
+            }
+
+            comboBox1.SelectedIndex = selectedIndex;
+        }
+
+        private static bool HasIPv4(NetworkInterface networkInterface)
+        {
+            foreach (UnicastIPAddressInformation address in networkInterface.GetIPProperties().UnicastAddresses)
+            {
+                if (address.Address.AddressFamily == AddressFamily.InterNetwork)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static string GetPrimaryIPv4(NetworkInterface networkInterface)
+        {
+            foreach (UnicastIPAddressInformation address in networkInterface.GetIPProperties().UnicastAddresses)
+            {
+                if (address.Address.AddressFamily == AddressFamily.InterNetwork)
+                {
+                    return address.Address.ToString();
+                }
+            }
+            return "0.0.0.0";
+        }
+
+        private static IPAddress GetPrimaryGateway(NetworkInterface networkInterface)
+        {
+            foreach (GatewayIPAddressInformation gateway in networkInterface.GetIPProperties().GatewayAddresses)
+            {
+                if (gateway.Address.AddressFamily == AddressFamily.InterNetwork && gateway.Address.ToString().CompareTo("0.0.0.0") != 0)
+                {
+                    return gateway.Address;
+                }
+            }
+            return null;
+        }
+
+        private static string BuildDisplayName(NetworkInterface networkInterface)
+        {
+            IPAddress gateway = GetPrimaryGateway(networkInterface);
+            string gatewayText = gateway == null ? "no gateway" : "gw " + gateway.ToString();
+            return networkInterface.Description + " (" + GetPrimaryIPv4(networkInterface) + ", " + gatewayText + ")";
+        }
+
+        private void UpdateRedirectInfo(NetworkInterface networkInterface)
+        {
+            try
+            {
+                IPv4InterfaceProperties properties = networkInterface.GetIPProperties().GetIPv4Properties();
+                if (properties != null && properties.IsForwardingEnabled)
+                {
+                    labelRedirectInfo.Text = "Windows does redirect packet,\n internal redirection will be turned off";
+                    packetsHaveToBeRedirected = false;
+                }
+                else
+                {
+                    labelRedirectInfo.Text = "Windows does not redirect packet,\n internal redirection will be turned on";
+                    packetsHaveToBeRedirected = true;
+                }
+            }
+            catch
+            {
+                labelRedirectInfo.Text = "Unable to read Windows forwarding status";
+                packetsHaveToBeRedirected = true;
+            }
         }
     }
-#pragma warning restore  // Falta el comentario XML para el tipo o miembro visible públicamente
+#pragma warning restore  // Falta el comentario XML para el tipo o miembro visible publicamente
 }
